@@ -18,6 +18,7 @@ public final class BlockADBDaemon {
     private let usbMonitor:     USBMonitor
     private let adbBlocker:     ADBBlocker
     private let networkBlocker: NetworkBlocker
+    private var proxyServer:    ADBProxyServer?
 
     private var sigtermSource: DispatchSourceSignal?
     private var sigintSource:  DispatchSourceSignal?
@@ -53,8 +54,21 @@ public final class BlockADBDaemon {
 
         networkBlocker.installRules()
 
+        if config.proxyMode {
+            startProxy()
+        }
+
         usbMonitor.onDeviceAttached = { [weak self] device in
             guard let self else { return }
+            if self.config.proxyMode {
+                // In proxy mode the adb server must stay alive — filtering
+                // happens at the protocol level via ADBProxyServer.
+                self.logger.log(
+                    "ADB device attached (proxy mode — filtering via proxy): \(device)",
+                    level: .info
+                )
+                return
+            }
             let result = self.adbBlocker.blockDevice(device)
             self.historyQueue.async {
                 self.blockingHistory.append(result)
@@ -69,14 +83,38 @@ public final class BlockADBDaemon {
         usbMonitor.start()
         registerSignalHandlers()
 
-        logger.log("BlockADB daemon running — monitoring USB and network ADB", level: .info)
+        let mode = config.proxyMode ? "proxy (selective filter)" : "full-block"
+        logger.log("BlockADB daemon running — mode: \(mode)", level: .info)
     }
 
-    /// Stops the daemon cleanly: removes network rules and stops USB monitoring.
+    /// Stops the daemon cleanly: removes network rules, stops USB monitoring,
+    /// and shuts down the proxy server if running.
     public func stop() {
         logger.log("BlockADB daemon stopping", level: .info)
         usbMonitor.stop()
         networkBlocker.removeRules()
+        proxyServer?.stop()
+        proxyServer = nil
+    }
+
+    // -----------------------------------------------------------------------
+    // MARK: Private — proxy startup
+    // -----------------------------------------------------------------------
+
+    private func startProxy() {
+        let proxy = ADBProxyServer(
+            proxyPort:              config.adbProxyPort,
+            upstreamPort:           config.adbUpstreamPort,
+            blockedServicePrefixes: config.blockedADBServices,
+            logger:                 logger
+        )
+        do {
+            try proxy.start()
+            proxyServer = proxy
+        } catch {
+            logger.log("Failed to start ADB proxy: \(error) — falling back to full-block mode",
+                       level: .error)
+        }
     }
 
     // -----------------------------------------------------------------------

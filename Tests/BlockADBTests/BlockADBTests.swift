@@ -279,3 +279,296 @@ final class LogLevelTests: XCTestCase {
         XCTAssertEqual(LogLevel.allCases.count, 5)
     }
 }
+
+// ---------------------------------------------------------------------------
+// MARK: - ADBMessage serialisation tests
+// ---------------------------------------------------------------------------
+
+final class ADBProtocolTests: XCTestCase {
+
+    // -----------------------------------------------------------------------
+    // MARK: Serialisation round-trip helpers
+    // -----------------------------------------------------------------------
+
+    /// Builds a minimal valid ADB message and serialises it.
+    private func makeMessage(command: ADBCommand,
+                             arg0: UInt32 = 0,
+                             arg1: UInt32 = 0,
+                             data: Data = Data()) -> Data {
+        ADBMessage(command: command, arg0: arg0, arg1: arg1, data: data).serialized()
+    }
+
+    // -----------------------------------------------------------------------
+    // MARK: Header structure
+    // -----------------------------------------------------------------------
+
+    func testSerializedLengthWithoutPayload() {
+        let bytes = makeMessage(command: .okay)
+        XCTAssertEqual(bytes.count, ADBMessage.headerSize,
+                       "A message with no payload must be exactly \(ADBMessage.headerSize) bytes")
+    }
+
+    func testSerializedLengthWithPayload() {
+        let payload = Data("sync:\0".utf8)
+        let bytes   = makeMessage(command: .open, data: payload)
+        XCTAssertEqual(bytes.count, ADBMessage.headerSize + payload.count)
+    }
+
+    func testMagicFieldIsCommandXorMask() {
+        let bytes = makeMessage(command: .open)
+        // command is at offset 0, magic at offset 20 — both little-endian UInt32
+        let cmd   = bytes[0..<4].withUnsafeBytes { UInt32(littleEndian: $0.load(as: UInt32.self)) }
+        let magic = bytes[20..<24].withUnsafeBytes { UInt32(littleEndian: $0.load(as: UInt32.self)) }
+        XCTAssertEqual(magic, cmd ^ 0xFFFF_FFFF)
+    }
+
+    func testDataLengthFieldMatchesPayload() {
+        let payload = Data(repeating: 0xAB, count: 42)
+        let bytes   = makeMessage(command: .wrte, data: payload)
+        let dataLen = bytes[12..<16].withUnsafeBytes { UInt32(littleEndian: $0.load(as: UInt32.self)) }
+        XCTAssertEqual(dataLen, 42)
+    }
+
+    // -----------------------------------------------------------------------
+    // MARK: CLSE factory
+    // -----------------------------------------------------------------------
+
+    func testClseFactoryCommand() {
+        let msg = ADBMessage.clse(remoteID: 7)
+        XCTAssertEqual(msg.command, .clse)
+        XCTAssertEqual(msg.arg0, 0,  "CLSE arg0 must be 0 (proxy has no local_id)")
+        XCTAssertEqual(msg.arg1, 7,  "CLSE arg1 must equal the client local_id")
+        XCTAssertTrue(msg.data.isEmpty)
+    }
+
+    // -----------------------------------------------------------------------
+    // MARK: Service string accessor
+    // -----------------------------------------------------------------------
+
+    func testServiceStringParsedFromOpenPayload() {
+        let svc  = "sync:"
+        let data = Data((svc + "\0").utf8)
+        let msg  = ADBMessage(command: .open, arg0: 1, arg1: 0, data: data)
+        XCTAssertEqual(msg.serviceString, svc)
+    }
+
+    func testServiceStringWithoutNulTerminator() {
+        let svc  = "shell:logcat"
+        let data = Data(svc.utf8)           // no NUL — parser should still work
+        let msg  = ADBMessage(command: .open, arg0: 1, arg1: 0, data: data)
+        XCTAssertEqual(msg.serviceString, svc)
+    }
+
+    func testServiceStringNilForNonOpenCommand() {
+        let msg = ADBMessage(command: .wrte, arg0: 1, arg1: 2, data: Data("hello".utf8))
+        XCTAssertNil(msg.serviceString)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MARK: - ADBMessageParser tests
+// ---------------------------------------------------------------------------
+
+final class ADBMessageParserTests: XCTestCase {
+
+    private func serialized(_ command: ADBCommand,
+                            arg0: UInt32 = 0,
+                            arg1: UInt32 = 0,
+                            data: Data = Data()) -> Data {
+        ADBMessage(command: command, arg0: arg0, arg1: arg1, data: data).serialized()
+    }
+
+    func testParseSingleCompleteMessage() {
+        let parser = ADBMessageParser()
+        let bytes  = serialized(.okay, arg0: 1, arg1: 2)
+        let msgs   = parser.feed(bytes)
+
+        XCTAssertEqual(msgs.count, 1)
+        XCTAssertEqual(msgs[0].command, .okay)
+        XCTAssertEqual(msgs[0].arg0, 1)
+        XCTAssertEqual(msgs[0].arg1, 2)
+    }
+
+    func testParseTwoConsecutiveMessages() {
+        let parser = ADBMessageParser()
+        var bytes  = serialized(.okay)
+        bytes     += serialized(.clse, arg0: 3, arg1: 4)
+        let msgs   = parser.feed(bytes)
+
+        XCTAssertEqual(msgs.count, 2)
+        XCTAssertEqual(msgs[0].command, .okay)
+        XCTAssertEqual(msgs[1].command, .clse)
+        XCTAssertEqual(msgs[1].arg0, 3)
+    }
+
+    func testParseMessageWithPayload() {
+        let parser  = ADBMessageParser()
+        let payload = Data("sync:\0".utf8)
+        let bytes   = serialized(.open, arg0: 5, data: payload)
+        let msgs    = parser.feed(bytes)
+
+        XCTAssertEqual(msgs.count, 1)
+        XCTAssertEqual(msgs[0].command, .open)
+        XCTAssertEqual(msgs[0].serviceString, "sync:")
+        XCTAssertEqual(msgs[0].data, payload)
+    }
+
+    func testParserBuffersIncompleteMessage() {
+        let parser = ADBMessageParser()
+        let full   = serialized(.okay)
+
+        // Feed only the first half — should produce no complete message.
+        let half   = full.prefix(full.count / 2)
+        let first  = parser.feed(Data(half))
+        XCTAssertEqual(first.count, 0, "Partial message must not be emitted")
+
+        // Feed the second half — should now complete.
+        let second = parser.feed(Data(full.dropFirst(half.count)))
+        XCTAssertEqual(second.count, 1)
+        XCTAssertEqual(second[0].command, .okay)
+    }
+
+    func testParserByteByByte() {
+        let parser  = ADBMessageParser()
+        let bytes   = serialized(.wrte, arg0: 9, arg1: 10)
+        var results = [ADBMessage]()
+
+        for byte in bytes {
+            results += parser.feed(Data([byte]))
+        }
+
+        XCTAssertEqual(results.count, 1)
+        XCTAssertEqual(results[0].command, .wrte)
+        XCTAssertEqual(results[0].arg0, 9)
+    }
+
+    func testParserRejectsInvalidMagic() {
+        // Craft a header with a wrong magic field — the parser should skip it.
+        let parser = ADBMessageParser()
+        var bad    = serialized(.okay)
+        // Corrupt the magic bytes at offset 20
+        bad[20] = 0xFF
+        bad[21] = 0xFF
+        bad[22] = 0xFF
+        bad[23] = 0xFF
+
+        // Feed corrupt header followed by a valid message.
+        var stream = bad
+        stream    += serialized(.clse, arg0: 1)
+        let msgs   = parser.feed(stream)
+
+        // The valid CLSE should eventually be found after re-sync.
+        XCTAssertTrue(msgs.contains { $0.command == .clse },
+                      "Parser should recover and emit the valid message after a bad magic")
+    }
+
+    func testParserReset() {
+        let parser = ADBMessageParser()
+        let half   = Data(serialized(.okay).prefix(10))
+        _ = parser.feed(half)   // partial data buffered
+
+        parser.reset()
+
+        // After reset, feeding a new complete message should work cleanly.
+        let msgs = parser.feed(serialized(.cnxn))
+        XCTAssertEqual(msgs.count, 1)
+        XCTAssertEqual(msgs[0].command, .cnxn)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MARK: - Proxy service filter logic tests (no network required)
+// ---------------------------------------------------------------------------
+
+final class ADBProxyFilterTests: XCTestCase {
+
+    /// Extracts service strings from OPEN messages and checks them against
+    /// the blocked prefix list — mirrors the filter logic in ADBProxyConnection.
+    private func isBlocked(_ service: String,
+                           prefixes: [String] = ["sync:"]) -> Bool {
+        prefixes.contains { service.hasPrefix($0) }
+    }
+
+    func testSyncServiceIsBlocked() {
+        XCTAssertTrue(isBlocked("sync:"))
+    }
+
+    func testShellServiceIsAllowed() {
+        XCTAssertFalse(isBlocked("shell:"))
+    }
+
+    func testShellWithCommandIsAllowed() {
+        XCTAssertFalse(isBlocked("shell:logcat -v time"))
+    }
+
+    func testJDWPServiceIsAllowed() {
+        XCTAssertFalse(isBlocked("jdwp:1234"))
+    }
+
+    func testTrackJDWPIsAllowed() {
+        XCTAssertFalse(isBlocked("track-jdwp:"))
+    }
+
+    func testModernInstallServicesAreAllowed() {
+        for svc in ["install:", "install-create:", "install-write:",
+                    "install-commit:", "install-session:"] {
+            XCTAssertFalse(isBlocked(svc), "\(svc) must not be blocked")
+        }
+    }
+
+    func testForwardAndReverseAreAllowed() {
+        XCTAssertFalse(isBlocked("forward:"))
+        XCTAssertFalse(isBlocked("reverse:"))
+    }
+
+    func testCustomBlockedPrefixIsRespected() {
+        XCTAssertTrue(isBlocked("shell:", prefixes: ["shell:", "sync:"]))
+        XCTAssertFalse(isBlocked("jdwp:",  prefixes: ["shell:", "sync:"]))
+    }
+
+    func testClseMessageForBlockedStream() {
+        // Verify that the CLSE rejection message carries the right IDs.
+        let clientLocalID: UInt32 = 42
+        let clse = ADBMessage.clse(remoteID: clientLocalID)
+        XCTAssertEqual(clse.command, .clse)
+        XCTAssertEqual(clse.arg0, 0,            "Proxy has no local_id for a rejected stream")
+        XCTAssertEqual(clse.arg1, clientLocalID, "arg1 must echo the client's local_id")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MARK: - Proxy config tests
+// ---------------------------------------------------------------------------
+
+final class ProxyConfigTests: XCTestCase {
+
+    func testDefaultProxyModeIsDisabled() {
+        XCTAssertFalse(BlockADBConfig.default.proxyMode)
+    }
+
+    func testDefaultProxyPorts() {
+        let cfg = BlockADBConfig.default
+        XCTAssertEqual(cfg.adbProxyPort,    5037)
+        XCTAssertEqual(cfg.adbUpstreamPort, 5038)
+    }
+
+    func testDefaultBlockedServicesContainsSync() {
+        XCTAssertTrue(BlockADBConfig.default.blockedADBServices.contains("sync:"))
+    }
+
+    func testProxyConfigRoundTrip() throws {
+        var cfg = BlockADBConfig.default
+        cfg.proxyMode           = true
+        cfg.adbProxyPort        = 5037
+        cfg.adbUpstreamPort     = 5039
+        cfg.blockedADBServices  = ["sync:", "exec:"]
+
+        let data    = try JSONEncoder().encode(cfg)
+        let decoded = try JSONDecoder().decode(BlockADBConfig.self, from: data)
+
+        XCTAssertTrue(decoded.proxyMode)
+        XCTAssertEqual(decoded.adbProxyPort,       5037)
+        XCTAssertEqual(decoded.adbUpstreamPort,    5039)
+        XCTAssertEqual(decoded.blockedADBServices, ["sync:", "exec:"])
+    }
+}

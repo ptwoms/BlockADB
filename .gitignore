@@ -1,0 +1,12 @@
+# Swift Package Manager build artifacts
+.build/
+*.o
+*.d
+
+# Xcode
+*.xcworkspace
+*.xcuserdata
+DerivedData/
+
+# macOS
+.DS_Store

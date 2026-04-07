@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.blockADB.plist — LaunchDaemon configuration for BlockADB.
+
+  Install:
+    sudo cp com.blockADB.plist /Library/LaunchDaemons/
+    sudo chown root:wheel /Library/LaunchDaemons/com.blockADB.plist
+    sudo chmod 644 /Library/LaunchDaemons/com.blockADB.plist
+    sudo launchctl load -w /Library/LaunchDaemons/com.blockADB.plist
+
+  Uninstall:
+    sudo launchctl unload /Library/LaunchDaemons/com.blockADB.plist
+    sudo rm /Library/LaunchDaemons/com.blockADB.plist
+-->
+<plist version="1.0">
+<dict>
+    <!-- Reverse-DNS label — unique identifier for this daemon -->
+    <key>Label</key>
+    <string>com.blockADB</string>
+
+    <!-- Absolute path to the BlockADB binary -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/BlockADB</string>
+    </array>
+
+    <!-- Start at boot and restart if it crashes -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Daemons run as root by default, which is required for pfctl rules.
+         If pfctl / network blocking is disabled in config, this can be
+         changed to a dedicated low-privilege user. -->
+    <key>UserName</key>
+    <string>root</string>
+
+    <!-- Redirect stdout/stderr to a log file for diagnostic purposes.
+         The Unified Logging system (os_log) is the primary log sink. -->
+    <key>StandardOutPath</key>
+    <string>/var/log/BlockADB.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/BlockADB.error.log</string>
+
+    <!-- Throttle restart to avoid tight crash-restart loops -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Prevent the daemon from being suspended when the display is off -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

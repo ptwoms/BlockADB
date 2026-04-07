@@ -296,7 +296,7 @@ Android Studio / adb CLI
 
 **What is allowed:** `install:`, `install-create:`, `install-write:`, `install-commit:` (modern APK install), `shell:`, `exec:`, `jdwp:`, `track-jdwp:`, `forward:`, `reverse:`, and all other services
 
-**Note on `adb install` compatibility:** Modern adb (≥ 1.0.32) and Android 7+ use dedicated `install:` services, not `sync:`. Older devices that use `sync:` + `shell:pm install` will have their install step blocked too.
+**Target requirement:** Android 11+ (API 30+). Devices on Android 7+ (API 24+) are also fully compatible — they use dedicated `install:` services, not `sync:`. Devices below Android 7.0 will have APK installation blocked along with file transfer; this is an accepted trade-off.
 
 ---
 

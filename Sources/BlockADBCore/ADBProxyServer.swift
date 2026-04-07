@@ -21,14 +21,14 @@
 // Service filtering rationale
 // ---------------------------
 // "sync:" is the ADB service that backs both `adb push` and `adb pull`.
-// Modern adb install (adb >= 1.0.32, Android 7+) uses the dedicated
-// "install:" / "install-create:" / "install-write:" / "install-commit:"
-// services and does NOT go through "sync:", so blocking "sync:" prevents
-// file transfer while leaving APK installation intact.
+// Android 7+ (API 24+) adb uses the dedicated "install:" / "install-create:"
+// / "install-write:" / "install-commit:" services and does NOT go through
+// "sync:", so blocking "sync:" prevents file transfer while leaving APK
+// installation fully intact on target devices.
 //
-// Older adb install (pre-7.0 devices) internally does adb push + pm install,
-// so it would also be blocked.  A config flag (allowSyncForInstallPath) can
-// be added later to permit sync writes to /data/local/tmp/*.apk only.
+// Devices below Android 7.0 use sync: internally for adb install and will
+// have APK installation blocked as well.  This is an accepted trade-off for
+// environments targeting Android 11+ (API 30+).
 //
 // Security note
 // -------------

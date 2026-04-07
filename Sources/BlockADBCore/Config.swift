@@ -51,6 +51,7 @@ public struct BlockADBConfig: Codable {
     // -------------------------------------------------------------------------
 
     /// Kill the `adb` host-side server process whenever an ADB device is detected.
+    /// Automatically set to false in proxy mode (the server must stay alive).
     public var killADBServer: Bool
 
     /// If true, log every detected USB device even when it is *not* ADB.
@@ -59,6 +60,36 @@ public struct BlockADBConfig: Codable {
     /// Path where BlockADB writes its human-readable log.  nil = log only to
     /// the macOS unified logging system (recommended for daemon use).
     public var logFilePath: String?
+
+    // -------------------------------------------------------------------------
+    // MARK: - Proxy mode
+    // -------------------------------------------------------------------------
+
+    /// When true, BlockADB operates as a selective ADB service filter instead
+    /// of killing the adb server entirely.  It relocates the real adb server to
+    /// ``adbUpstreamPort`` and intercepts all client connections on
+    /// ``adbProxyPort``, blocking only the services listed in
+    /// ``blockedADBServices``.
+    ///
+    /// Proxy mode allows Android app debugging and APK installation while
+    /// preventing raw file transfer (`adb push` / `adb pull`).
+    public var proxyMode: Bool
+
+    /// Port the transparent proxy listens on (what clients connect to).
+    /// Must match the port adb clients expect — default 5037.
+    public var adbProxyPort: UInt16
+
+    /// Port the real adb server is relocated to when proxy mode is active.
+    /// Default 5038.
+    public var adbUpstreamPort: UInt16
+
+    /// ADB service string prefixes that the proxy refuses to open.
+    /// Any OPEN message whose service starts with one of these strings is
+    /// rejected with a CLSE reply and never forwarded to the real server.
+    ///
+    /// Default ["sync:"] blocks `adb push` and `adb pull` while leaving
+    /// install, shell, and JDWP services untouched.
+    public var blockedADBServices: [String]
 
     // -------------------------------------------------------------------------
     // MARK: - Defaults
@@ -74,7 +105,11 @@ public struct BlockADBConfig: Codable {
         additionalBlockedPorts: [5554, 5556, 5557, 5558],
         killADBServer: true,
         verboseUSBLogging: false,
-        logFilePath: nil
+        logFilePath: nil,
+        proxyMode: false,
+        adbProxyPort: 5037,
+        adbUpstreamPort: 5038,
+        blockedADBServices: ["sync:"]
     )
 
     // -------------------------------------------------------------------------

@@ -31,7 +31,9 @@ BlockADB/
 │       ├── USBMonitor.swift         # IOKit USB device monitoring
 │       ├── ADBBlocker.swift         # ADB process termination logic
 │       ├── NetworkBlocker.swift     # pfctl firewall rule management
-│       └── BlockADBDaemon.swift     # Orchestrator / lifecycle manager
+│       ├── BlockADBDaemon.swift     # Orchestrator / lifecycle manager
+│       ├── ADBProtocol.swift        # ADB wire-protocol message types & parser
+│       └── ADBProxyServer.swift     # Selective ADB service filter (proxy mode)
 └── Tests/
     └── BlockADBTests/
         └── BlockADBTests.swift      # XCTest unit tests
@@ -53,6 +55,7 @@ BlockADB/
 | Platform | macOS 12 (Monterey)+ |
 | USB monitoring | IOKit (C framework, bridged to Swift) |
 | Firewall | pfctl (BSD packet filter, via `Process`) |
+| Proxy networking | Network.framework (`NWListener` / `NWConnection`) |
 | Service management | launchd |
 | Logging | os.log (macOS Unified Logging) + optional file |
 | Testing | XCTest |
@@ -120,12 +123,23 @@ The compiled binary is placed at `.build/debug/BlockADB` or `.build/release/Bloc
 - All `Process` invocations use absolute executable paths
 
 ### `BlockADBDaemon.swift`
-- Wires USBMonitor → ADBBlocker + NetworkBlocker
+- Wires USBMonitor → ADBBlocker + NetworkBlocker + ADBProxyServer
 - Registers `SIGTERM`/`SIGINT` signal handlers for clean shutdown
 - Maintains a history of blocking events
+- In proxy mode: skips killing adb and starts `ADBProxyServer` instead
+
+### `ADBProtocol.swift`
+- Defines `ADBCommand` enum with all six wire-protocol command codes
+- `ADBMessage` struct: serialisation, magic-field generation, service-string accessor, CLSE factory
+- `ADBMessageParser`: incremental byte-buffer parser; handles TCP fragmentation and framing errors
+
+### `ADBProxyServer.swift`
+- `ADBProxyServer`: `NWListener`-based TCP proxy on `127.0.0.1:<proxyPort>`
+- Locates the `adb` binary and starts the real server on the upstream port before listening
+- `ADBProxyConnection`: per-connection relay; filters client→server OPEN messages by service prefix; drops follow-up WRTE/OKAY/CLSE on blocked streams; passes server→client bytes through unmodified
 
 ### `main.swift`
-- Parses CLI arguments (`--config`, `--dump-config`, `--verbose`, `--no-network-block`, etc.)
+- Parses CLI arguments (`--config`, `--dump-config`, `--verbose`, `--no-network`, `--proxy-mode`, `--proxy-port`, `--upstream-port`, etc.)
 - Loads configuration and starts `BlockADBDaemon`
 
 ---
@@ -151,6 +165,19 @@ Default config schema (JSON):
 
 Config is loaded at startup; no runtime reloading. `blockedVendorIDs` defaults to all 20 known Android OEM vendor IDs defined in `Config.swift`.
 
+### Proxy-mode additions
+
+```json
+{
+  "proxyMode": false,
+  "adbProxyPort": 5037,
+  "adbUpstreamPort": 5038,
+  "blockedADBServices": ["sync:"]
+}
+```
+
+`blockedADBServices` lists ADB service string prefixes to reject. The default `["sync:"]` blocks `adb push` and `adb pull` while allowing `install:`, `shell:`, `jdwp:`, and all other services.
+
 ---
 
 ## Testing
@@ -168,6 +195,10 @@ Tests live in `Tests/BlockADBTests/BlockADBTests.swift` and use XCTest.
 | `ADBBlockerTests` | Process discovery (no hardware required) |
 | `NetworkBlockerTests` | pfctl paths, no-op when disabled |
 | `LogLevelTests` | Log level ordering |
+| `ADBProtocolTests` | Message serialisation, magic field, CLSE factory, service string |
+| `ADBMessageParserTests` | Incremental parsing, fragmentation, byte-by-byte, bad magic recovery |
+| `ADBProxyFilterTests` | Service prefix filtering logic (no network required) |
+| `ProxyConfigTests` | Proxy config defaults and JSON round-trip |
 
 **Testing principles:**
 - All tests run without root, attached hardware, or IOKit access
@@ -236,6 +267,39 @@ Push all changes to this branch. Never push directly to `main` without explicit 
 
 ---
 
+## Proxy Mode Architecture
+
+```
+Android Studio / adb CLI
+         │
+         │ TCP :5037
+         ▼
+  ┌─────────────────┐
+  │  ADBProxyServer │  (BlockADB — no entitlements needed)
+  │  127.0.0.1:5037 │
+  └────────┬────────┘
+           │ parse OPEN messages
+           │ block "sync:" → send CLSE back to client
+           │ allow everything else
+           │ TCP :5038
+           ▼
+  ┌─────────────────┐
+  │  adb server     │  (real adb, relocated from :5037)
+  │  127.0.0.1:5038 │
+  └────────┬────────┘
+           │ USB / TCP
+           ▼
+     Android device
+```
+
+**What is blocked:** `sync:` service — covers `adb push` and `adb pull`
+
+**What is allowed:** `install:`, `install-create:`, `install-write:`, `install-commit:` (modern APK install), `shell:`, `exec:`, `jdwp:`, `track-jdwp:`, `forward:`, `reverse:`, and all other services
+
+**Target requirement:** Android 11+ (API 30+). Devices on Android 7+ (API 24+) are also fully compatible — they use dedicated `install:` services, not `sync:`. Devices below Android 7.0 will have APK installation blocked along with file transfer; this is an accepted trade-off.
+
+---
+
 ## Common Tasks for AI Assistants
 
 ### Adding a new Android vendor ID
@@ -258,4 +322,21 @@ sudo .build/debug/BlockADB --verbose
 ### Checking IOKit USB events
 ```bash
 log stream --predicate 'subsystem == "com.blockADB"' --level debug
+```
+
+### Adding a new blocked ADB service
+Edit `Config.swift` — add the service prefix string to the `blockedADBServices` default array. Update `ADBProxyFilterTests` with a matching test case.
+
+### Modifying proxy filtering logic
+Work in `ADBProxyServer.swift` — the `processClientMessage(_:)` method on `ADBProxyConnection` is where all filtering decisions are made. `ADBProtocol.swift` contains the message types and parser; changes to either should be accompanied by tests in `ADBMessageParserTests` or `ADBProxyFilterTests`.
+
+### Enabling proxy mode via config file
+```json
+{
+  "proxyMode": true,
+  "adbProxyPort": 5037,
+  "adbUpstreamPort": 5038,
+  "blockedADBServices": ["sync:"],
+  "killADBServer": false
+}
 ```

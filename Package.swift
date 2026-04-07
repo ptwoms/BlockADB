@@ -21,7 +21,8 @@ let package = Package(
             dependencies: [],
             path: "Sources/BlockADBCore",
             linkerSettings: [
-                .linkedFramework("IOKit", .when(platforms: [.macOS])),
+                .linkedFramework("IOKit",    .when(platforms: [.macOS])),
+                .linkedFramework("Network",  .when(platforms: [.macOS])),
                 .linkedFramework("Foundation")
             ]
         ),

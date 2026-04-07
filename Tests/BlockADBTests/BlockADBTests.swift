@@ -34,8 +34,9 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(BlockADBConfig.default.blockNetworkADB)
     }
 
-    func testDefaultConfigKillsADBServer() {
-        XCTAssertTrue(BlockADBConfig.default.killADBServer)
+    func testDefaultConfigDoesNotKillADBServer() {
+        XCTAssertFalse(BlockADBConfig.default.killADBServer,
+                       "Default config must not kill the ADB server — proxy mode handles filtering")
     }
 
     func testDefaultConfigAllowedVendorIDsIsEmpty() {
@@ -79,7 +80,7 @@ final class ConfigTests: XCTestCase {
 
     func testAllowlistPreventBlocking() {
         var config = BlockADBConfig.default
-        config.allowedVendorIDs = [KnownAndroidVendorID.google]
+        config.allowedVendorIDs = KnownAndroidVendorID.all
         XCTAssertTrue(config.allowedVendorIDs.contains(KnownAndroidVendorID.google))
     }
 
@@ -103,6 +104,13 @@ final class ConfigTests: XCTestCase {
         XCTAssertNotNil(loaded)
         XCTAssertTrue(loaded!.verboseUSBLogging)
         XCTAssertEqual(loaded!.logFilePath, "/tmp/BlockADB.log")
+    }
+
+    func testRuntimeSummaryDescribesDefaultDebugFriendlyMode() {
+        let summary = BlockADBConfig.default.runtimeSummary
+        XCTAssertTrue(summary.contains("mode=proxy"))
+        XCTAssertTrue(summary.contains("proxyPort=5037"))
+        XCTAssertTrue(summary.contains("blockedServices=[\"sync:\"]"))
     }
 }
 
@@ -542,8 +550,9 @@ final class ADBProxyFilterTests: XCTestCase {
 
 final class ProxyConfigTests: XCTestCase {
 
-    func testDefaultProxyModeIsDisabled() {
-        XCTAssertFalse(BlockADBConfig.default.proxyMode)
+    func testDefaultProxyModeIsEnabled() {
+        XCTAssertTrue(BlockADBConfig.default.proxyMode,
+                      "Default config must enable proxy mode to block only file transfer")
     }
 
     func testDefaultProxyPorts() {
@@ -570,5 +579,27 @@ final class ProxyConfigTests: XCTestCase {
         XCTAssertEqual(decoded.adbProxyPort,       5037)
         XCTAssertEqual(decoded.adbUpstreamPort,    5039)
         XCTAssertEqual(decoded.blockedADBServices, ["sync:", "exec:"])
+    }
+}
+
+final class ADBProxyStartupDiagnosticsTests: XCTestCase {
+
+    func testParseListeningProcessSummaryFromLsofFieldOutput() {
+        let output = """
+        p4242
+        cadb
+        n127.0.0.1:5037
+        """
+
+        XCTAssertEqual(
+            ADBProxyServer.parseListeningProcessSummary(from: output),
+            "adb (PID 4242) on 127.0.0.1:5037"
+        )
+    }
+
+    func testPortInUseErrorIncludesHelpfulOwner() {
+        let error = ADBProxyError.portInUse(5037, owner: "BlockADB (PID 9001) on 127.0.0.1:5037")
+        XCTAssertTrue(error.description.contains("BlockADB"))
+        XCTAssertTrue(error.description.contains("--proxy-port"))
     }
 }

@@ -1,6 +1,6 @@
 # BlockADB
 
-A macOS security utility that **automatically blocks Android Debug Bridge (ADB) access** when an Android device is connected to a Mac via USB or over the network (wireless ADB).
+A macOS security utility that **blocks ADB file-transfer commands** (`adb push`, `adb pull`, `adb sync`) to prevent data exfiltration from company machines, while **preserving developer workflows** — Android Studio debugging, `adb install`, `adb logcat`, and JDWP continue to work normally.
 
 ---
 
@@ -62,16 +62,20 @@ Android 11+ supports **ADB over Wi-Fi** (wireless debugging):
 
 ## How BlockADB Works
 
-BlockADB uses two complementary mechanisms:
+BlockADB uses two complementary mechanisms to block **only** ADB file-transfer while leaving the rest of the developer toolchain intact.
 
-### 1. USB ADB Blocking
+### 1. ADB Protocol Proxy (default — selective file-transfer blocking)
 
-`USBMonitor` registers IOKit matching notifications for `IOUSBInterface` objects.  When a new interface appears, it checks:
-- Does the interface expose class `0xFF` / sub-class `0x42` / protocol `0x01`?
-- Does the parent device's vendor ID appear in the configured block list?
-- Is the vendor ID *not* in the explicit allow list?
+`ADBProxyServer` intercepts ADB client connections and inspects each `OPEN` message:
 
-If all checks pass, `ADBBlocker` sends **SIGTERM** to every running `adb` process found via `sysctl(KERN_PROC_ALL)`.  This terminates the host-side ADB server, severing the USB communication channel without requiring hardware-level USB disconnection.
+- **Allowed** — `shell:`, `install:`, `install-create:`, `install-write:`, `install-commit:`, `jdwp:`, `track-jdwp:`, `forward:`, `reverse:`, and all other services.
+- **Blocked** — `sync:` (the service that backs both `adb push` and `adb pull`, and `adb sync`).  Blocked streams receive an immediate `CLSE` response; Android Studio and the `adb` CLI see a clean rejection for the file-transfer command only.
+
+How it works:
+
+1. BlockADB starts the real `adb` server on an alternate port (default 5038) via `adb -P 5038 start-server`.
+2. BlockADB listens on `127.0.0.1:5037` (the port clients expect).
+3. Every connection is relayed bidirectionally — except `OPEN sync:` messages, which are rejected with a `CLSE`.
 
 ### 2. Network (Wireless) ADB Blocking
 
@@ -112,27 +116,38 @@ sudo ./install.sh
 BlockADB [OPTIONS]
 
 OPTIONS:
-  --config <path>     Path to a JSON configuration file.
-                      Defaults: /etc/BlockADB/config.json
-                                ~/.config/BlockADB/config.json
-  --log <path>        Write log output to this file in addition to
-                      the macOS Unified Logging system.
-  --no-network        Skip installing pfctl rules for wireless ADB.
-  --no-kill           Do not kill the adb server process.
-  --verbose           Log every USB device event, not just ADB ones.
-  --dump-config       Print the effective configuration as JSON and exit.
-  --version           Print version and exit.
-  --help              Print this help and exit.
+  --config <path>       Path to a JSON configuration file.
+                        Defaults: /etc/BlockADB/config.json,
+                                  ~/.config/BlockADB/config.json
+  --log <path>          Write log output to this file in addition to the
+                        macOS Unified Logging system.
+  --no-network          Skip installing pfctl rules for wireless ADB.
+  --no-kill             Do not kill the adb server process.
+  --verbose             Log every USB device event, not just ADB ones.
+  --debug-run           Mirror logs to stderr and enable verbose USB logging
+                        for debugger-friendly foreground runs.
+  --proxy-mode          Run as a selective ADB protocol filter (default).
+                        Blocks file transfer (adb push/pull/sync) while
+                        allowing app debugging and APK installation.
+  --proxy-port <n>      Port the proxy listens on (default 5037).
+  --upstream-port <n>   Port the real adb server is relocated to (default 5038).
+  --dump-config         Print the effective configuration as JSON and exit.
+  --version             Print version and exit.
+  --help                Print this help and exit.
 ```
 
 ### Examples
 
 ```bash
-# Run with all defaults (requires root for pfctl)
+# Run with defaults — blocks file transfer, keeps debugging alive
+# (requires root for pfctl network rules)
 sudo BlockADB
 
 # Run without network rules (no root required)
 BlockADB --no-network
+
+# Run in a debugger-friendly foreground mode with live console logs
+BlockADB --debug-run --no-network
 
 # Dump effective config (useful for debugging)
 BlockADB --dump-config
@@ -140,6 +155,27 @@ BlockADB --dump-config
 # Run with verbose USB logging and a custom config
 sudo BlockADB --verbose --config /etc/myorg/blockadb.json
 ```
+
+### What is blocked / allowed
+
+| ADB command | Status |
+|---|---|
+| `adb push` | ❌ Blocked |
+| `adb pull` | ❌ Blocked |
+| `adb sync` | ❌ Blocked |
+| `adb shell` | ✅ Allowed |
+| `adb logcat` | ✅ Allowed |
+| `adb install` | ✅ Allowed |
+| Android Studio debugging | ✅ Allowed |
+| JDWP / port forwarding | ✅ Allowed |
+
+### Proxy Mode Setup
+
+BlockADB runs in proxy mode by default — it takes over port 5037 and moves the
+real `adb` server to port 5038.  Android Studio and `adb` commands continue to
+work normally; only `adb push`, `adb pull`, and `adb sync` are blocked.
+
+Ensure `ANDROID_HOME` is set or `adb` is in your `PATH` before starting.
 
 ### Monitoring Logs
 
@@ -152,6 +188,9 @@ log stream --predicate 'subsystem == "com.blockADB"'
 # Query historical entries
 log show --predicate 'subsystem == "com.blockADB"' --last 1h
 ```
+
+For local debugging, `--debug-run` mirrors those same log lines to `stderr` so
+they are visible immediately in Terminal, `swift run`, or an attached debugger.
 
 ---
 
@@ -174,11 +213,15 @@ BlockADB reads JSON configuration from (in priority order):
   "additionalBlockedPorts": [5554, 5556, 5557, 5558],
   "allowedVendorIDs": [],
   "blockNetworkADB": true,
+  "blockedADBServices": ["sync:"],
   "blockedVendorIDs": [
     1282, 2996, 4100, 16596, 4820, 6353, 4316, ...
   ],
-  "killADBServer": true,
+  "killADBServer": false,
   "logFilePath": "/var/log/BlockADB.log",
+  "proxyMode": true,
+  "adbProxyPort": 5037,
+  "adbUpstreamPort": 5038,
   "verboseUSBLogging": false
 }
 ```
@@ -187,16 +230,20 @@ BlockADB reads JSON configuration from (in priority order):
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `blockedVendorIDs` | `[UInt16]` | All known Android OEM IDs | Vendor IDs to block |
-| `allowedVendorIDs` | `[UInt16]` | `[]` | Vendor IDs to explicitly allow (overrides block list) |
-| `adbInterfaceClass` | `UInt8` | `255` (0xFF) | USB interface class for ADB detection |
-| `adbInterfaceSubClass` | `UInt8` | `66` (0x42) | USB interface sub-class for ADB detection |
-| `adbInterfaceProtocol` | `UInt8` | `1` (0x01) | USB interface protocol for ADB detection |
-| `blockNetworkADB` | `Bool` | `true` | Install pfctl rules for TCP 5555 |
-| `additionalBlockedPorts` | `[UInt16]` | `[5554,5556,5557,5558]` | Extra TCP ports to block |
-| `killADBServer` | `Bool` | `true` | Send SIGTERM to `adb` processes on device attach |
-| `verboseUSBLogging` | `Bool` | `false` | Log all USB events, not just ADB |
-| `logFilePath` | `String?` | `nil` | Optional plain-text log file path |
+| `proxyMode` | `Bool` | `true` | Run as a selective ADB proxy instead of killing the adb server.  Blocks only `blockedADBServices` while allowing all other ADB traffic. |
+| `blockedADBServices` | `[String]` | `["sync:"]` | ADB service prefixes to reject.  `sync:` backs `adb push`, `adb pull`, and `adb sync`. |
+| `adbProxyPort` | `UInt16` | `5037` | Port the proxy listens on (clients connect here). |
+| `adbUpstreamPort` | `UInt16` | `5038` | Port the real adb server is relocated to. |
+| `blockedVendorIDs` | `[UInt16]` | All known Android OEM IDs | Vendor IDs to watch for ADB interface detection. |
+| `allowedVendorIDs` | `[UInt16]` | `[]` | Vendor IDs to explicitly allow (overrides block list). |
+| `adbInterfaceClass` | `UInt8` | `255` (0xFF) | USB interface class for ADB detection. |
+| `adbInterfaceSubClass` | `UInt8` | `66` (0x42) | USB interface sub-class for ADB detection. |
+| `adbInterfaceProtocol` | `UInt8` | `1` (0x01) | USB interface protocol for ADB detection. |
+| `blockNetworkADB` | `Bool` | `true` | Install pfctl rules for TCP 5555 (wireless ADB). |
+| `additionalBlockedPorts` | `[UInt16]` | `[5554,5556,5557,5558]` | Extra TCP ports to block (emulator ports). |
+| `killADBServer` | `Bool` | `false` | Send SIGTERM to all `adb` processes on device attach (broad block — overrides proxy mode). |
+| `verboseUSBLogging` | `Bool` | `false` | Log all USB events, not just ADB. |
+| `logFilePath` | `String?` | `nil` | Optional plain-text log file path. |
 
 ### Allowing a Specific Developer Device
 
@@ -278,38 +325,38 @@ BlockADB/
     │  (IOKit run    │  │  (pfctl anchor    │
     │   loop thread) │  │   com.blockADB)   │
     └────────┬───────┘  └───────────────────┘
-             │ onDeviceAttached
-    ┌────────▼───────┐
-    │  ADBBlocker    │
-    │  (sysctl +     │
-    │   SIGTERM adb) │
-    └────────────────┘
-             │
-    ┌────────▼───────┐
-    │   ADBLogger    │
-    │ (os_log +      │
-    │  optional file)│
-    └────────────────┘
+             │ onDeviceAttached (proxy mode: log only)
+    ┌────────▼────────────┐
+    │   ADBProxyServer    │  (default mode)
+    │   127.0.0.1:5037    │
+    │   blocks "sync:"    │
+    │   allows all else   │
+    └────────┬────────────┘
+             │ relay (filtered)
+    ┌────────▼────────────┐
+    │   real adb server   │
+    │   127.0.0.1:5038    │
+    └─────────────────────┘
 ```
 
 ---
 
 ## Security Considerations
 
-### Why killing `adb` is sufficient
+### Why the proxy approach is the right default
 
-Forcibly removing a USB interface via IOKit requires the
-`com.apple.security.iokit-user-client-class` entitlement, partial SIP
-disablement, or a kernel extension — all of which have significant security
-implications.  Killing the `adb` host server is equally effective: the Android
-device's `adbd` daemon remains running, but without the host-side counterpart,
-no ADB communication can occur.
+BlockADB intercepts ADB messages at the protocol level rather than killing the adb server.  This gives fine-grained control:
+
+- `sync:` OPEN requests are rejected with an immediate `CLSE` — blocking `adb push`, `adb pull`, and `adb sync` without disrupting other services.
+- All other services (`shell:`, `install:`, JDWP, etc.) are forwarded to the real adb server transparently.
+- The `killADBServer` (full-block) option remains available for environments that need to cut off all ADB access.
 
 ### Privilege requirements
 
 | Feature | Privilege needed |
 |---------|-----------------|
 | USB monitoring (IOKit notifications) | None (user-space) |
+| ADB proxy (port binding 5037/5038) | None (user-space, loopback only) |
 | Killing `adb` processes | Must own the process *or* be root |
 | PF firewall rules (`pfctl`) | Root |
 | LaunchDaemon loading | Root |
@@ -318,7 +365,7 @@ no ADB communication can occur.
 
 - It does **not** modify System Integrity Protection settings.
 - It does **not** install any kernel extensions (kexts / dexts).
-- It does **not** capture or inspect the content of ADB traffic.
+- It does **not** capture or persist the content of ADB traffic.
 - It does **not** prevent users with root from re-enabling ADB manually.
 
 For a locked-down managed environment, combine BlockADB with an MDM profile

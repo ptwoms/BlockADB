@@ -103,10 +103,10 @@ public struct BlockADBConfig: Codable {
         adbInterfaceProtocol: 0x01,
         blockNetworkADB: true,
         additionalBlockedPorts: [5554, 5556, 5557, 5558],
-        killADBServer: true,
+        killADBServer: false,
         verboseUSBLogging: false,
         logFilePath: nil,
-        proxyMode: false,
+        proxyMode: true,
         adbProxyPort: 5037,
         adbUpstreamPort: 5038,
         blockedADBServices: ["sync:"]
@@ -147,6 +147,22 @@ public struct BlockADBConfig: Codable {
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true)
         try data.write(to: url, options: .atomic)
+    }
+
+    /// Human-readable runtime summary used for startup diagnostics.
+    public var runtimeSummary: String {
+        let mode = proxyMode ? "proxy" : "full-block"
+        let adbHandling: String
+        if proxyMode {
+            adbHandling = "proxyPort=\(adbProxyPort), upstreamPort=\(adbUpstreamPort), blockedServices=\(blockedADBServices)"
+        } else if killADBServer {
+            adbHandling = "killADBServer=true"
+        } else {
+            adbHandling = "observe-only"
+        }
+
+        let logDestination = logFilePath ?? "unified-log only"
+        return "Runtime config: mode=\(mode), networkADB=\(blockNetworkADB), \(adbHandling), verboseUSBLogging=\(verboseUSBLogging), logDestination=\(logDestination)"
     }
 }
 

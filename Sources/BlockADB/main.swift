@@ -35,6 +35,8 @@ func printHelp() {
       --no-network          Skip installing pfctl rules for wireless ADB.
       --no-kill             Do not kill the adb server process.
       --verbose             Log every USB device event, not just ADB ones.
+      --debug-run           Mirror logs to stderr and enable verbose USB
+                            logging for debugger-friendly foreground runs.
       --proxy-mode          Run as a selective ADB protocol filter instead of
                             killing the adb server.  Blocks file transfer
                             (adb push/pull) while allowing app debugging and
@@ -48,8 +50,11 @@ func printHelp() {
       --help                Print this help and exit.
 
     EXAMPLES:
-      # Run with defaults — kills adb on device connect (requires root for pfctl)
+      # Run with defaults — blocks file transfer while keeping debugging alive
       sudo BlockADB
+
+      # Local debug run — foreground logs to stderr, no root needed
+      BlockADB --debug-run --no-network
 
       # Proxy mode — allow debugging and installs, block file transfer
       BlockADB --proxy-mode
@@ -85,6 +90,7 @@ var logPath:       String? = nil
 var noNetwork      = false
 var noKill         = false
 var verbose        = false
+var debugRun       = false
 var dumpConfig     = false
 var proxyMode      = false
 var proxyPort:     UInt16? = nil
@@ -120,6 +126,8 @@ while i < args.endIndex {
         noKill = true
     case "--verbose":
         verbose = true
+    case "--debug-run":
+        debugRun = true
     case "--dump-config":
         dumpConfig = true
     case "--proxy-mode":
@@ -163,6 +171,7 @@ if let path = configPath {
 if noNetwork { config.blockNetworkADB = false }
 if noKill    { config.killADBServer   = false }
 if verbose   { config.verboseUSBLogging = true }
+if debugRun  { config.verboseUSBLogging = true }
 if let lp = logPath { config.logFilePath = lp }
 
 if proxyMode {
@@ -190,7 +199,10 @@ if dumpConfig {
 // MARK: - Run daemon
 // ---------------------------------------------------------------------------
 
-let daemon = BlockADBDaemon(config: config)
+let daemon = BlockADBDaemon(
+    config: config,
+    mirrorLogsToStandardError: debugRun
+)
 daemon.start()
 
 // Keep the main thread alive — the USB monitor run loop runs on its own thread

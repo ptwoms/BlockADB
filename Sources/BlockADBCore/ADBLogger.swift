@@ -48,6 +48,7 @@ public final class ADBLogger {
 #endif
     private let queue = DispatchQueue(label: "com.blockADB.logger", qos: .utility)
     private var fileHandle: FileHandle?
+    private var mirrorToStandardError = false
     private let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
@@ -59,11 +60,12 @@ public final class ADBLogger {
 
     /// Configures optional file-based logging.  Must be called once before
     /// the first ``log(_:level:)`` call if file output is desired.
-    public func configure(logFilePath: String?) {
-        queue.async { [weak self] in
+    public func configure(logFilePath: String?, mirrorToStandardError: Bool = false) {
+        queue.sync { [weak self] in
             guard let self else { return }
             self.fileHandle?.closeFile()
             self.fileHandle = nil
+            self.mirrorToStandardError = mirrorToStandardError
             guard let path = logFilePath else { return }
             let fm = FileManager.default
             if !fm.fileExists(atPath: path) {
@@ -84,6 +86,9 @@ public final class ADBLogger {
             guard let self else { return }
             let timestamp = self.dateFormatter.string(from: Date())
             let line = "[\(timestamp)] [\(level.rawValue)] \(message)\n"
+            if self.mirrorToStandardError {
+                fputs(line, stderr)
+            }
             if let data = line.data(using: .utf8) {
                 self.fileHandle?.write(data)
             }
@@ -94,4 +99,3 @@ public final class ADBLogger {
         fileHandle?.closeFile()
     }
 }
-

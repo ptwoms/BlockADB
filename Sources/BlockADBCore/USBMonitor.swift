@@ -154,7 +154,7 @@ public final class USBMonitor {
             { context, iterator in
                 guard let ctx = context else { return }
                 let monitor = Unmanaged<USBMonitor>.fromOpaque(ctx).takeUnretainedValue()
-                monitor.handleIterator(iterator!, attached: true)
+                monitor.handleIterator(iterator, attached: true)
             },
             selfPtr,
             &addedIterator
@@ -173,7 +173,7 @@ public final class USBMonitor {
             { context, iterator in
                 guard let ctx = context else { return }
                 let monitor = Unmanaged<USBMonitor>.fromOpaque(ctx).takeUnretainedValue()
-                monitor.handleIterator(iterator!, attached: false)
+                monitor.handleIterator(iterator, attached: false)
             },
             selfPtr,
             &removedIterator
@@ -256,8 +256,8 @@ public final class USBMonitor {
         else {
             return nil
         }
-        let vendorID  = UInt16(bitPattern: Int16(vendorIDRaw))
-        let productID = UInt16(bitPattern: Int16(productIDRaw))
+        let vendorID  = UInt16(vendorIDRaw)
+        let productID = UInt16(productIDRaw)
 
         if config.allowedVendorIDs.contains(vendorID) { return nil }
         guard config.blockedVendorIDs.contains(vendorID) else { return nil }

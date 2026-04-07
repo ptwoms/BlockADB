@@ -171,8 +171,11 @@ public final class ADBMessageParser {
             guard buffer.count >= totalLen else { break }   // wait for payload
 
             // Skip unknown commands rather than treating them as errors.
+            // Use removeFirst() (one byte) instead of removeFirst(totalLen) so
+            // we don't accidentally skip past a valid message that follows a
+            // false-positive magic match during re-sync.
             guard let command = ADBCommand(rawValue: cmdRaw) else {
-                buffer.removeFirst(totalLen)
+                buffer.removeFirst()   // discard one byte and retry from next position
                 continue
             }
 
@@ -199,7 +202,7 @@ public final class ADBMessageParser {
     private func le32(at offset: Int) -> UInt32 {
         let s = buffer.startIndex + offset
         return buffer[s ..< s + 4].withUnsafeBytes {
-            UInt32(littleEndian: $0.load(as: UInt32.self))
+            $0.loadUnaligned(as: UInt32.self).littleEndian
         }
     }
 }

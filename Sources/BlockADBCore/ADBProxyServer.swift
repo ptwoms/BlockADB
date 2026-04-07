@@ -36,12 +36,15 @@
 // No external connections are accepted.
 
 import Foundation
+#if canImport(Network)
 import Network
+#endif
 
 // ---------------------------------------------------------------------------
 // MARK: - Proxy server
 // ---------------------------------------------------------------------------
 
+#if canImport(Network)
 /// Listens on the ADB client port and relays connections to the real adb
 /// server, filtering out blocked service streams along the way.
 public final class ADBProxyServer {
@@ -212,20 +215,6 @@ public final class ADBProxyServer {
             queue:                  queue
         )
         proxyConn.start()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// MARK: - Error
-// ---------------------------------------------------------------------------
-
-public enum ADBProxyError: Error, CustomStringConvertible {
-    case invalidPort(UInt16)
-
-    public var description: String {
-        switch self {
-        case .invalidPort(let p): return "Invalid proxy port: \(p)"
-        }
     }
 }
 
@@ -401,5 +390,59 @@ final class ADBProxyConnection {
                 self?.logger.log("ADB proxy send error: \(error)", level: .warning)
             }
         })
+    }
+}
+
+#else // !canImport(Network)
+
+// ---------------------------------------------------------------------------
+// MARK: - Platform stub (non-macOS)
+// ---------------------------------------------------------------------------
+// Network.framework is not available on Linux or other non-Apple platforms.
+// These stubs satisfy the type system so BlockADBDaemon compiles everywhere;
+// start() always throws, so proxy mode is effectively disabled on unsupported
+// platforms.
+
+/// Stub: ADB proxy is not supported on platforms without Network.framework.
+public final class ADBProxyServer {
+    public let proxyPort: UInt16
+    public let upstreamPort: UInt16
+    public let blockedServicePrefixes: [String]
+
+    public init(
+        proxyPort: UInt16 = 5037,
+        upstreamPort: UInt16 = 5038,
+        blockedServicePrefixes: [String] = ["sync:"],
+        logger: ADBLogger = .shared
+    ) {
+        self.proxyPort = proxyPort
+        self.upstreamPort = upstreamPort
+        self.blockedServicePrefixes = blockedServicePrefixes
+    }
+
+    public func start() throws {
+        throw ADBProxyError.unsupportedPlatform
+    }
+
+    public func stop() {}
+
+    static func resolveADBExecutable() -> String? { nil }
+}
+
+#endif // canImport(Network)
+
+// ---------------------------------------------------------------------------
+// MARK: - Error
+// ---------------------------------------------------------------------------
+
+public enum ADBProxyError: Error, CustomStringConvertible {
+    case invalidPort(UInt16)
+    case unsupportedPlatform
+
+    public var description: String {
+        switch self {
+        case .invalidPort(let p): return "Invalid proxy port: \(p)"
+        case .unsupportedPlatform: return "ADB proxy requires Network.framework (macOS/iOS only)"
+        }
     }
 }

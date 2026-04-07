@@ -103,10 +103,10 @@ public struct BlockADBConfig: Codable {
         adbInterfaceProtocol: 0x01,
         blockNetworkADB: true,
         additionalBlockedPorts: [5554, 5556, 5557, 5558],
-        killADBServer: true,
+        killADBServer: false,
         verboseUSBLogging: false,
         logFilePath: nil,
-        proxyMode: false,
+        proxyMode: true,
         adbProxyPort: 5037,
         adbUpstreamPort: 5038,
         blockedADBServices: ["sync:"]

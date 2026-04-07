@@ -172,7 +172,7 @@ public final class ADBMessageParser {
 
             // Skip unknown commands rather than treating them as errors.
             guard let command = ADBCommand(rawValue: cmdRaw) else {
-                buffer.removeFirst(totalLen)
+                buffer.removeFirst()   // discard one byte and re-sync
                 continue
             }
 
@@ -199,7 +199,7 @@ public final class ADBMessageParser {
     private func le32(at offset: Int) -> UInt32 {
         let s = buffer.startIndex + offset
         return buffer[s ..< s + 4].withUnsafeBytes {
-            UInt32(littleEndian: $0.load(as: UInt32.self))
+            $0.loadUnaligned(as: UInt32.self).littleEndian
         }
     }
 }

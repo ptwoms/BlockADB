@@ -34,8 +34,9 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(BlockADBConfig.default.blockNetworkADB)
     }
 
-    func testDefaultConfigKillsADBServer() {
-        XCTAssertTrue(BlockADBConfig.default.killADBServer)
+    func testDefaultConfigDoesNotKillADBServer() {
+        XCTAssertFalse(BlockADBConfig.default.killADBServer,
+                       "Default config must not kill the ADB server — proxy mode handles filtering")
     }
 
     func testDefaultConfigAllowedVendorIDsIsEmpty() {
@@ -542,8 +543,9 @@ final class ADBProxyFilterTests: XCTestCase {
 
 final class ProxyConfigTests: XCTestCase {
 
-    func testDefaultProxyModeIsDisabled() {
-        XCTAssertFalse(BlockADBConfig.default.proxyMode)
+    func testDefaultProxyModeIsEnabled() {
+        XCTAssertTrue(BlockADBConfig.default.proxyMode,
+                      "Default config must enable proxy mode to block only file transfer")
     }
 
     func testDefaultProxyPorts() {

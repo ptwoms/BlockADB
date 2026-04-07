@@ -71,8 +71,10 @@ public final class ADBProxyServer {
 
     private let logger: ADBLogger
     private var listener: NWListener?
+    private var activeConnections: [UUID: ADBProxyConnection] = [:]
     private let queue = DispatchQueue(label: "com.blockADB.proxy",
                                       qos: .userInitiated)
+    private static let lsofPath = "/usr/sbin/lsof"
 
     // -----------------------------------------------------------------------
     // MARK: Init
@@ -97,23 +99,27 @@ public final class ADBProxyServer {
     /// Starts the real adb server on ``upstreamPort``, then begins listening
     /// on ``proxyPort``.  Throws if the listener cannot be created.
     public func start() throws {
-        startUpstreamADBServer()
+        let adbPath = ADBProxyServer.resolveADBExecutable()
+        releaseProxyPort(adbPath: adbPath)
+        startUpstreamADBServer(adbPath: adbPath)
 
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
-        // Restrict the listener to the loopback interface so that only
-        // processes on this machine can reach the proxy — mirroring the
-        // behaviour of the real adb server (127.0.0.1:5037).
-        params.requiredLocalEndpoint = NWEndpoint.hostPort(
-            host: "127.0.0.1",
-            port: NWEndpoint.Port(rawValue: proxyPort) ?? .any
-        )
+        // Keep the listener local-only without also pre-binding a specific
+        // endpoint. Using requiredLocalEndpoint here and then passing `on:`
+        // to NWListener caused EINVAL on startup because the local bind
+        // details were effectively specified twice.
+        params.acceptLocalOnly = true
 
         guard let nwPort = NWEndpoint.Port(rawValue: proxyPort) else {
             throw ADBProxyError.invalidPort(proxyPort)
         }
         let listener = try NWListener(using: params, on: nwPort)
         self.listener = listener
+
+        let startupSemaphore = DispatchSemaphore(value: 0)
+        var startupError: Error?
+        var startupResolved = false
 
         listener.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
@@ -124,8 +130,18 @@ public final class ADBProxyServer {
                     + "→ upstream :(\(self.upstreamPort))",
                     level: .info
                 )
+                if !startupResolved {
+                    startupResolved = true
+                    startupSemaphore.signal()
+                }
             case .failed(let err):
-                self.logger.log("ADB proxy listener failed: \(err)", level: .fault)
+                let resolvedError = self.listenerStartupError(from: err)
+                self.logger.log("ADB proxy listener failed: \(resolvedError)", level: .fault)
+                if !startupResolved {
+                    startupResolved = true
+                    startupError = resolvedError
+                    startupSemaphore.signal()
+                }
             default:
                 break
             }
@@ -136,12 +152,21 @@ public final class ADBProxyServer {
         }
 
         listener.start(queue: queue)
+
+        if startupSemaphore.wait(timeout: .now() + .seconds(2)) == .success,
+           let startupError {
+            listener.cancel()
+            self.listener = nil
+            throw startupError
+        }
     }
 
     /// Stops listening and cancels all in-flight connections.
     public func stop() {
         listener?.cancel()
         listener = nil
+        activeConnections.values.forEach { $0.stop() }
+        activeConnections.removeAll()
         logger.log("ADB proxy stopped", level: .info)
     }
 
@@ -151,8 +176,8 @@ public final class ADBProxyServer {
 
     /// Launches `adb -P <upstreamPort> start-server` so the real server
     /// relocates to the upstream port before the proxy takes :5037.
-    private func startUpstreamADBServer() {
-        guard let adbPath = ADBProxyServer.resolveADBExecutable() else {
+    private func startUpstreamADBServer(adbPath: String?) {
+        guard let adbPath else {
             logger.log(
                 "adb executable not found — skipping upstream server start. "
                 + "Set ANDROID_HOME or add adb to PATH.",
@@ -161,20 +186,32 @@ public final class ADBProxyServer {
             return
         }
 
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: adbPath)
-        proc.arguments = ["-P", "\(upstreamPort)", "start-server"]
-
-        do {
-            try proc.run()
-            proc.waitUntilExit()
+        let result = runProcess(adbPath, args: ["-P", "\(upstreamPort)", "start-server"])
+        if result.status == 0 {
             logger.log(
-                "Started upstream adb server on port \(upstreamPort) "
-                + "(exit: \(proc.terminationStatus))",
+                "Started upstream adb server on port \(upstreamPort)",
                 level: .info
             )
-        } catch {
-            logger.log("Failed to start upstream adb server: \(error)", level: .error)
+        } else {
+            logger.log(
+                "Failed to start upstream adb server on port \(upstreamPort) "
+                + "(exit: \(result.status))",
+                level: .error
+            )
+        }
+    }
+
+    /// Best-effort cleanup of any existing adb server already listening on the
+    /// client-facing proxy port before we try to bind it ourselves.
+    private func releaseProxyPort(adbPath: String?) {
+        guard let adbPath else { return }
+
+        let result = runProcess(adbPath, args: ["-P", "\(proxyPort)", "kill-server"])
+        if result.status == 0 {
+            logger.log(
+                "Requested adb server shutdown on proxy port \(proxyPort) before starting proxy",
+                level: .info
+            )
         }
     }
 
@@ -198,6 +235,93 @@ public final class ADBProxyServer {
         }
     }
 
+    static func parseListeningProcessSummary(from output: String) -> String? {
+        var pid: String?
+        var command: String?
+        var endpoint: String?
+
+        for line in output.split(whereSeparator: \.isNewline) {
+            guard let prefix = line.first else { continue }
+            let value = String(line.dropFirst())
+            switch prefix {
+            case "p":
+                pid = value
+            case "c":
+                command = value
+            case "n":
+                endpoint = value
+            default:
+                continue
+            }
+        }
+
+        guard pid != nil || command != nil || endpoint != nil else { return nil }
+
+        var summary = command ?? "unknown process"
+        if let pid {
+            summary += " (PID \(pid))"
+        }
+        if let endpoint {
+            summary += " on \(endpoint)"
+        }
+        return summary
+    }
+
+    private func listenerStartupError(from error: NWError) -> Error {
+        if case .posix(let code) = error, code == .EADDRINUSE {
+            let owner = currentProxyPortOwner()
+            return ADBProxyError.portInUse(proxyPort, owner: owner)
+        }
+        return ADBProxyError.listenerStartupFailed(String(describing: error))
+    }
+
+    private func currentProxyPortOwner() -> String? {
+        let result = runProcess(
+            Self.lsofPath,
+            args: ["-nP", "-iTCP:\(proxyPort)", "-sTCP:LISTEN", "-Fpcn"],
+            captureOutput: true
+        )
+        guard result.status == 0 else { return nil }
+        return Self.parseListeningProcessSummary(from: result.output)
+    }
+
+    @discardableResult
+    private func runProcess(
+        _ executable: String,
+        args: [String],
+        captureOutput: Bool = false
+    ) -> (status: Int32, output: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = args
+
+        let outputPipe = Pipe()
+        if captureOutput {
+            process.standardOutput = outputPipe
+            process.standardError = outputPipe
+        } else {
+            let devNull = FileHandle.nullDevice
+            process.standardOutput = devNull
+            process.standardError = devNull
+        }
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let output: String
+            if captureOutput {
+                let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                output = String(data: data, encoding: .utf8) ?? ""
+            } else {
+                output = ""
+            }
+            return (process.terminationStatus, output)
+        } catch {
+            logger.log("Failed to launch \(executable): \(error)", level: .error)
+            return (-1, "")
+        }
+    }
+
     // -----------------------------------------------------------------------
     // MARK: Private — connection handling
     // -----------------------------------------------------------------------
@@ -206,13 +330,23 @@ public final class ADBProxyServer {
         guard let nwPort = NWEndpoint.Port(rawValue: upstreamPort) else { return }
 
         let serverConn = NWConnection(host: "127.0.0.1", port: nwPort, using: .tcp)
+        let connectionID = UUID()
 
         let proxyConn = ADBProxyConnection(
+            id:                     connectionID,
             client:                 clientConn,
             server:                 serverConn,
             blockedServicePrefixes: blockedServicePrefixes,
             logger:                 logger,
-            queue:                  queue
+            queue:                  queue,
+            onClose:                { [weak self] id in
+                self?.activeConnections.removeValue(forKey: id)
+            }
+        )
+        activeConnections[connectionID] = proxyConn
+        logger.log(
+            "ADB proxy accepted client connection \(connectionID.uuidString)",
+            level: .debug
         )
         proxyConn.start()
     }
@@ -234,11 +368,13 @@ final class ADBProxyConnection {
     // MARK: Properties
     // -----------------------------------------------------------------------
 
+    private let id: UUID
     private let clientConn: NWConnection
     private let serverConn: NWConnection
     private let blockedServicePrefixes: [String]
     private let logger: ADBLogger
     private let queue: DispatchQueue
+    private let onClose: (UUID) -> Void
 
     /// Parser for the client→server direction.
     private let clientParser = ADBMessageParser()
@@ -246,23 +382,28 @@ final class ADBProxyConnection {
     /// Local stream IDs (from OPEN arg0) whose OPEN was blocked.
     /// WRTE / OKAY / CLSE messages carrying these IDs are dropped silently.
     private var blockedLocalIDs = Set<UInt32>()
+    private var isClosed = false
 
     // -----------------------------------------------------------------------
     // MARK: Init & start
     // -----------------------------------------------------------------------
 
     init(
+        id: UUID,
         client: NWConnection,
         server: NWConnection,
         blockedServicePrefixes: [String],
         logger: ADBLogger,
-        queue: DispatchQueue
+        queue: DispatchQueue,
+        onClose: @escaping (UUID) -> Void
     ) {
+        self.id                     = id
         self.clientConn             = client
         self.serverConn             = server
         self.blockedServicePrefixes = blockedServicePrefixes
         self.logger                 = logger
         self.queue                  = queue
+        self.onClose                = onClose
     }
 
     func start() {
@@ -273,13 +414,21 @@ final class ADBProxyConnection {
                 self?.startRelay()
             case .failed(let err):
                 self?.logger.log("Proxy upstream connect failed: \(err)", level: .warning)
-                self?.clientConn.cancel()
+                self?.stop()
+            case .cancelled:
+                self?.closeIfNeeded()
             default:
                 break
             }
         }
         serverConn.start(queue: queue)
         clientConn.start(queue: queue)
+    }
+
+    func stop() {
+        clientConn.cancel()
+        serverConn.cancel()
+        closeIfNeeded()
     }
 
     // -----------------------------------------------------------------------
@@ -307,7 +456,7 @@ final class ADBProxyConnection {
             }
 
             if isComplete || error != nil {
-                self.serverConn.cancel()
+                self.stop()
                 return
             }
             self.readFromClient()
@@ -369,7 +518,7 @@ final class ADBProxyConnection {
             }
 
             if isComplete || error != nil {
-                self.clientConn.cancel()
+                self.stop()
                 return
             }
             self.readFromServer()
@@ -390,6 +539,16 @@ final class ADBProxyConnection {
                 self?.logger.log("ADB proxy send error: \(error)", level: .warning)
             }
         })
+    }
+
+    private func closeIfNeeded() {
+        guard !isClosed else { return }
+        isClosed = true
+        logger.log(
+            "ADB proxy closed client connection \(id.uuidString)",
+            level: .debug
+        )
+        onClose(id)
     }
 }
 
@@ -437,11 +596,20 @@ public final class ADBProxyServer {
 
 public enum ADBProxyError: Error, CustomStringConvertible {
     case invalidPort(UInt16)
+    case portInUse(UInt16, owner: String?)
+    case listenerStartupFailed(String)
     case unsupportedPlatform
 
     public var description: String {
         switch self {
         case .invalidPort(let p): return "Invalid proxy port: \(p)"
+        case .portInUse(let p, let owner):
+            if let owner {
+                return "Proxy port \(p) is already in use by \(owner). Stop the existing adb server or BlockADB instance, or choose a different --proxy-port."
+            }
+            return "Proxy port \(p) is already in use. Stop the existing adb server or BlockADB instance, or choose a different --proxy-port."
+        case .listenerStartupFailed(let message):
+            return "ADB proxy listener startup failed: \(message)"
         case .unsupportedPlatform: return "ADB proxy requires Network.framework (macOS/iOS only)"
         }
     }

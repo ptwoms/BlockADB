@@ -148,6 +148,22 @@ public struct BlockADBConfig: Codable {
             withIntermediateDirectories: true)
         try data.write(to: url, options: .atomic)
     }
+
+    /// Human-readable runtime summary used for startup diagnostics.
+    public var runtimeSummary: String {
+        let mode = proxyMode ? "proxy" : "full-block"
+        let adbHandling: String
+        if proxyMode {
+            adbHandling = "proxyPort=\(adbProxyPort), upstreamPort=\(adbUpstreamPort), blockedServices=\(blockedADBServices)"
+        } else if killADBServer {
+            adbHandling = "killADBServer=true"
+        } else {
+            adbHandling = "observe-only"
+        }
+
+        let logDestination = logFilePath ?? "unified-log only"
+        return "Runtime config: mode=\(mode), networkADB=\(blockNetworkADB), \(adbHandling), verboseUSBLogging=\(verboseUSBLogging), logDestination=\(logDestination)"
+    }
 }
 
 // -------------------------------------------------------------------------

@@ -124,6 +124,8 @@ OPTIONS:
   --no-network          Skip installing pfctl rules for wireless ADB.
   --no-kill             Do not kill the adb server process.
   --verbose             Log every USB device event, not just ADB ones.
+  --debug-run           Mirror logs to stderr and enable verbose USB logging
+                        for debugger-friendly foreground runs.
   --proxy-mode          Run as a selective ADB protocol filter (default).
                         Blocks file transfer (adb push/pull/sync) while
                         allowing app debugging and APK installation.
@@ -143,6 +145,9 @@ sudo BlockADB
 
 # Run without network rules (no root required)
 BlockADB --no-network
+
+# Run in a debugger-friendly foreground mode with live console logs
+BlockADB --debug-run --no-network
 
 # Dump effective config (useful for debugging)
 BlockADB --dump-config
@@ -183,6 +188,9 @@ log stream --predicate 'subsystem == "com.blockADB"'
 # Query historical entries
 log show --predicate 'subsystem == "com.blockADB"' --last 1h
 ```
+
+For local debugging, `--debug-run` mirrors those same log lines to `stderr` so
+they are visible immediately in Terminal, `swift run`, or an attached debugger.
 
 ---
 

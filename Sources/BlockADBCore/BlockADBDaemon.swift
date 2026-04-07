@@ -31,11 +31,17 @@ public final class BlockADBDaemon {
     // MARK: Init
     // -----------------------------------------------------------------------
 
-    public init(config: BlockADBConfig = .load()) {
+    public init(
+        config: BlockADBConfig = .load(),
+        mirrorLogsToStandardError: Bool = false
+    ) {
         self.config = config
 
         logger = ADBLogger.shared
-        logger.configure(logFilePath: config.logFilePath)
+        logger.configure(
+            logFilePath: config.logFilePath,
+            mirrorToStandardError: mirrorLogsToStandardError
+        )
 
         usbMonitor     = USBMonitor(config: config, logger: logger)
         adbBlocker     = ADBBlocker(config: config, logger: logger)
@@ -51,6 +57,7 @@ public final class BlockADBDaemon {
     public func start() {
         logger.log("BlockADB daemon starting (PID \(ProcessInfo.processInfo.processIdentifier))",
                    level: .info)
+        logger.log(config.runtimeSummary, level: .info)
 
         networkBlocker.installRules()
 

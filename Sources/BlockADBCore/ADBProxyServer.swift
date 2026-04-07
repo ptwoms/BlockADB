@@ -180,7 +180,7 @@ public final class ADBProxyServer {
 
     /// Searches well-known locations for the `adb` binary.
     /// Returns the first executable found, or nil.
-    static func resolveADBExecutable() -> String? {
+    public static func resolveADBExecutable() -> String? {
         let env = ProcessInfo.processInfo.environment
         let home = env["HOME"] ?? ""
         let androidHome = env["ANDROID_HOME"] ?? env["ANDROID_SDK_ROOT"] ?? ""
@@ -426,7 +426,7 @@ public final class ADBProxyServer {
 
     public func stop() {}
 
-    static func resolveADBExecutable() -> String? { nil }
+    public static func resolveADBExecutable() -> String? { nil }
 }
 
 #endif // canImport(Network)

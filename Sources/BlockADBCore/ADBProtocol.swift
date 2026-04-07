@@ -171,8 +171,11 @@ public final class ADBMessageParser {
             guard buffer.count >= totalLen else { break }   // wait for payload
 
             // Skip unknown commands rather than treating them as errors.
+            // Use removeFirst() (one byte) instead of removeFirst(totalLen) so
+            // we don't accidentally skip past a valid message that follows a
+            // false-positive magic match during re-sync.
             guard let command = ADBCommand(rawValue: cmdRaw) else {
-                buffer.removeFirst()   // discard one byte and re-sync
+                buffer.removeFirst()   // discard one byte and retry from next position
                 continue
             }
 
